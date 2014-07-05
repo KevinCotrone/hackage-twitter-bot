@@ -1,4 +1,9 @@
-# hackage-twitter-bot
+=======
+hackage-twitter-bot
+===================
+
+A twitter bot for hackage2
+
 
 TODO: Write description here
 
