@@ -1,60 +1,101 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DeriveDataTypeable         #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE TemplateHaskell            #-}
+{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE OverloadedStrings          #-}
 
 module Main where
 
 
-import           Control.Applicative
+import           Control.Applicative        ((<$>), (<*>))
+import           Control.Exception          (bracket)
 import           Control.Lens
-import           Control.Monad
+import           Control.Monad              (join, msum)
+import           Control.Monad.Reader       (ask)
+import           Control.Monad.State        (get, put)
+import           Data.Acid                  (AcidState, Query, Update,
+                                             makeAcidic, openLocalStateFrom)
+import           Data.Acid.Advanced         (query', update')
+import           Data.Acid.Local            (createCheckpointAndClose)
 import qualified Data.Attoparsec.Text       as APT
 import qualified Data.ByteString.Lazy       as L
 import qualified Data.ByteString.Lazy.Char8 as CBS
+import           Data.Data                  (Data, Typeable)
 import           Data.Maybe
 import           Data.Monoid
+import           Data.SafeCopy              (base, deriveSafeCopy)
 import           Data.Text
 import           Data.Time.Clock
 import           Data.Time.Format
 import qualified Data.Traversable           as T
 import           Data.Word
-import           Network.Wreq
+import qualified Network.Wreq               as W
 import           System.Environment
+import           System.Locale
 import           Text.Feed.Export
 import           Text.Feed.Import
 import           Text.Feed.Types
 import           Text.RSS.Syntax
 import           Text.XML.Light
-import System.Locale
+import Data.Time.Calendar
+
+data LastTimeState = LastTimeState { lastTime :: UTCTime }
+    deriving (Eq, Ord, Read, Show, Data, Typeable)
+
+-- $(deriveSafeCopy 0 ' base ''UTCTime)
+
+$(deriveSafeCopy 0 'base ''LastTimeState)
+
+initialLastTimeState :: IO LastTimeState
+initialLastTimeState = do
+  ct <- getCurrentTime
+  return $ LastTimeState ct
+
+setNewLastTime :: UTCTime -> Update LastTimeState UTCTime
+setNewLastTime time = do
+     put $ LastTimeState time
+     return time
+
+peekLastTime :: Query LastTimeState UTCTime
+peekLastTime = lastTime <$> ask
+
+$(makeAcidic ''LastTimeState ['setNewLastTime, 'peekLastTime])
 
 main :: IO ()
 main = do
-  feedBody <- get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf responseBody
+  iState <- initialLastTimeState
+  st <- openLocalStateFrom "state" iState
+  lastTime <- query' st PeekLastTime
+  feedBody <- W.get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf W.responseBody
   let feed = parseFeedString feedBody
-  T.sequence $ postFeed <$> feed
+  parsed <- parseFeeds $ fromJust feed
+  putStrLn . show $ Prelude.filter (\post -> postTime post < lastTime) $ catMaybes parsed
   return ()
 
-postFeed :: Feed -> IO ()
-postFeed (RSSFeed feed) = do
-  putStrLn . show . Prelude.map createPost $ rssItems . rssChannel $ feed
+parseFeeds :: Feed -> IO [Maybe Post]
+parseFeeds (RSSFeed feed) = do
+  return $ Prelude.map createPost $ rssItems . rssChannel $ feed
 
 
-createPost :: RSSItem -> Maybe String
-createPost item =
-    let title = rssItemTitle item
-        mAuthorDesc = join $ (\desc -> eitherToMaybe . APT.parseOnly parseAuthorAndDescription $ pack desc) <$> (rssItemDescription item)
-    in (\title (author,_,desc) -> title ++ ", " ++ author ++ ": " ++ desc) <$> title <*> mAuthorDesc
+createPost :: RSSItem -> Maybe Post
+createPost item =join $ (\desc -> eitherToMaybe . APT.parseOnly parsePost $ pack desc) <$> (rssItemDescription item)
 
 
 eitherToMaybe :: Either a b -> Maybe b
 eitherToMaybe = either (\_ -> Nothing) (Just)
 
-data AuthorDescription = AuthorDescription {author :: Text , description :: Text} deriving (Show)
+data Post = Post {author :: String , description :: String, postTime :: UTCTime} deriving (Show)
 
 
 parseStupidTime :: String -> Maybe UTCTime
 parseStupidTime = parseTime defaultTimeLocale "%a %b  %e %H:%M:%S %Z %Y"
 
-parseAuthorAndDescription :: APT.Parser (String, Maybe UTCTime,String)
-parseAuthorAndDescription = do
+parsePost :: APT.Parser Post
+parsePost = do
     APT.string "<i>"
     author <- APT.takeWhile (\c -> c /= ',')
     APT.take 2
@@ -64,7 +105,9 @@ parseAuthorAndDescription = do
     APT.skipWhile (\c -> c /= '>')
     APT.take 1
     description <- APT.takeText
-    return $ (unpack author, parseStupidTime . unpack $ sDate, unpack description)
+    case (parseStupidTime . unpack $ sDate) of
+      (Just time) ->  return $ Post (unpack author) (unpack description) time
+      _ -> fail "Error reading time"
 
 -- "<i>Added by BryanOSullivan, Sat Jul  5 05:57:18 UTC 2014.</i><p>Pure and impure Bloom Filter implementations."
 
