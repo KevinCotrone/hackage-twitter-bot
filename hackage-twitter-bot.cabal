@@ -1,0 +1,61 @@
+Name:                   hackage-twitter-bot
+Version:                0.0.0
+Author:                 Kevin Cotrone <kevincotrone@gmail.com>
+Maintainer:             Kevin Cotrone <kevincotrone@gmail.com>
+License:                BSD3
+License-File:           LICENSE
+-- Synopsis:               
+-- Description:            
+Cabal-Version:          >= 1.10
+Build-Type:             Simple
+
+Library
+  Default-Language:     Haskell2010
+  HS-Source-Dirs:       src
+  GHC-Options:          -Wall
+  Exposed-Modules:      Hackage.Twitter.Bot
+  Other-Modules:        Hackage.Twitter.Bot.Internal
+  Build-Depends:        base >= 4 && < 5
+                      , wreq
+                      , feed
+                      , lens
+                      , bytestring
+                      , xml
+                      , attoparsec
+                      , text
+                      , time
+                      , safe
+                      , iso8601-time
+                      , old-locale
+                      , acid-state
+
+Test-Suite spec
+  Type:                 exitcode-stdio-1.0
+  Default-Language:     Haskell2010
+  Hs-Source-Dirs:       src
+                      , test
+  Ghc-Options:          -Wall
+  Main-Is:              Spec.hs
+  Build-Depends:        base
+                      , hspec
+
+executable hackage-twitter-bot-exec
+  main-is:              Main.hs
+  hs-source-dirs:       src
+  Build-Depends:        base
+                      , wreq
+                      , feed
+                      , lens
+                      , bytestring
+                      , xml
+                      , attoparsec
+                      , text
+                      , time
+                      , safe
+                      , old-locale
+                      , iso8601-time
+                      , acid-state
+
+Source-Repository head
+  Type:                 git
+--  Location:             
