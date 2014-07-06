@@ -6,21 +6,29 @@
 {-# LANGUAGE MultiParamTypeClasses      #-}
 {-# LANGUAGE OverloadedStrings          #-}
 {-# LANGUAGE RecordWildCards            #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
 {-# LANGUAGE TemplateHaskell            #-}
-{-# LANGUAGE TypeFamilies, ScopedTypeVariables               #-}
+{-# LANGUAGE TypeFamilies               #-}
 
 
 module Main where
 
 
+import           Common
 import           Control.Applicative        ((<$>), (<*>))
-import           Control.Exception          (bracket, catch, IOException)
+import           Control.Applicative
+import           Control.Concurrent
+import           Control.Concurrent.Async
+import           Control.Exception          (IOException, bracket, catch)
+import           Control.Exception.Base
 import           Control.Lens
-import           Control.Monad              (join, msum, mzero, forever)
+import           Control.Monad              (forever, join, msum, mzero)
+import           Control.Monad.IO.Class
 import           Control.Monad.Reader       (ask)
 import           Control.Monad.State        (get, put)
-import           Data.Acid                  (AcidState, Query, Update, createCheckpoint,
-                                             makeAcidic, openLocalStateFrom)
+import           Data.Acid                  (AcidState, Query, Update,
+                                             createCheckpoint, makeAcidic,
+                                             openLocalStateFrom)
 import           Data.Acid.Advanced         (query', update')
 import           Data.Acid.Local            (createCheckpointAndClose)
 import           Data.Aeson
@@ -31,15 +39,23 @@ import           Data.Char
 import           Data.Data                  (Data, Typeable)
 import           Data.Maybe
 import           Data.Monoid
+import           Data.Monoid
 import           Data.SafeCopy              (base, deriveSafeCopy)
 import           Data.Text
+import qualified Data.Text                  as T
+import qualified Data.Text.IO               as T
 import           Data.Time.Calendar
 import           Data.Time.Clock
 import           Data.Time.Format
 import qualified Data.Traversable           as T
 import           Data.Word
+import           Data.Yaml
 import           GHC.Generics
+import           Hackage.Twitter.Bot.Acid
+import           Hackage.Twitter.Bot.Bitly
+import           Hackage.Twitter.Bot.Types
 import qualified Network.Wreq               as W
+import           System.Environment
 import           System.Environment
 import           System.Locale
 import           Text.Feed.Export
@@ -47,57 +63,8 @@ import           Text.Feed.Import
 import           Text.Feed.Types
 import           Text.RSS.Syntax
 import           Text.XML.Light
-import qualified Data.Text as T
-import qualified Data.Text.IO as T
-import Data.Monoid
-import Control.Applicative
-import Control.Monad.IO.Class
-import Web.Twitter.Conduit
-import System.Environment
-import Common
-import Control.Exception.Base
-import Control.Concurrent
-import Control.Concurrent.Async
-import  Data.Yaml
+import           Web.Twitter.Conduit
 
-data LastTimeState = LastTimeState { lastTime :: UTCTime }
-    deriving (Eq, Ord, Read, Show, Data, Typeable)
-
--- $(deriveSafeCopy 0 ' base ''UTCTime)
-
-$(deriveSafeCopy 0 'base ''LastTimeState)
-
-
-data BitLyData a = BitLyData {bitlyData :: a} deriving (Show)
-data BitLyURL = BitLyURL {bitLyUrl :: String} deriving (Show)
-data BitLyKey = BitLyKey {bitLyKey :: String} deriving (Show, Eq, Generic)
-
-instance (FromJSON a) => FromJSON (BitLyData a) where
-  parseJSON (Object o) = BitLyData <$> o .: "data"
-  parseJSON _ = mzero
-
-instance FromJSON BitLyKey where
-
-instance FromJSON BitLyURL where
-  parseJSON (Object o) = BitLyURL <$> o .: "url"
-  parseJSON _ = mzero
-
-
-
-initialLastTimeState :: LastTimeState
-initialLastTimeState =  LastTimeState $ UTCTime (ModifiedJulianDay 0) (secondsToDiffTime 0)
-
-setNewLastTime :: UTCTime -> Update LastTimeState UTCTime
-setNewLastTime time = do
-  c@LastTimeState{..} <- get
-  let time' = max time lastTime
-  put $ LastTimeState time'
-  return time'
-
-peekLastTime :: Query LastTimeState UTCTime
-peekLastTime = lastTime <$> ask
-
-$(makeAcidic ''LastTimeState ['setNewLastTime, 'peekLastTime])
 
 main :: IO ()
 main = do
@@ -110,21 +77,23 @@ main = do
 
 startBot :: BitLyKey -> AcidState LastTimeState -> IO ()
 startBot key st = forever $ do
-  lastTime <- query' st PeekLastTime
+  lastTime <- query' st PeekLastTime -- Get the time of the last post
   putStrLn "Getting body"
-  feedBody <- W.get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf W.responseBody
-  let feed = parseFeedString feedBody
+  feedBody <- W.get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf W.responseBody -- Fetch the rss fedd in a bytestring and then cconcat it
+  let feed = parseFeedString feedBody -- Parse the feed
   putStrLn "Parsing feeds"
-  parsed <- parseFeeds $ fromJust feed
-  let filteredFeeds = Prelude.filter (\post -> fullPostTime post > lastTime) $ catMaybes parsed
+  parsed <- parseFeeds $ fromJust feed -- Should be able to just 
+  let filteredFeeds = Prelude.filter (\post -> fullPostTime post > lastTime) $ catMaybes parsed -- filter the posts that have might have already been posted
   putStrLn "Getting body"
-  shortenedFeeds <- traverse (shortenURLs key) filteredFeeds
-  T.traverse (\fp -> update' st (SetNewLastTime (fullPostTime fp))) (catMaybes shortenedFeeds)
+  shortenedFeeds <- traverse (shortenURLs key) filteredFeeds                                    -- shorten all yrks
+  T.traverse (\fp -> update' st (SetNewLastTime (fullPostTime fp))) (catMaybes shortenedFeeds)  -- update the acid-state when appropriate
   createCheckpoint st
   putStrLn . show . Prelude.map formatPost $ catMaybes shortenedFeeds
-  traverse (\post -> catch (postToTwitter . formatPost $ post) (\(e :: SomeException) -> putStrLn . show $ e)) $ catMaybes shortenedFeeds
+  traverse (\post -> catch (postToTwitter . formatPost $ post) (\(e :: SomeException) -> putStrLn . show $ e)) $ catMaybes shortenedFeeds -- post all remaining to twitter
   threadDelay $ 15 * 1000000
 
+-- Use the environment variables (Look at twitter-conduit for more information)
+-- in order to make a post
 postToTwitter :: String -> IO ()
 postToTwitter st = runTwitterFromEnv' $ do
   let status = T.pack st
@@ -132,11 +101,12 @@ postToTwitter st = runTwitterFromEnv' $ do
   res <- call $ update status
   liftIO $ print res
 
+-- Attempt to read a feed into fullposts
 parseFeeds :: Feed -> IO [Maybe FullPost]
 parseFeeds (RSSFeed feed) = do
   return $ Prelude.map createPost $ rssItems . rssChannel $ feed
 
-
+-- Take an RSS item and attempt to parse it and turn it into a post
 createPost :: RSSItem -> Maybe FullPost
 createPost item =
   let partialPost = join $ (\desc -> eitherToMaybe . APT.parseOnly parsePost $ pack desc) <$> (rssItemDescription item)
@@ -144,7 +114,7 @@ createPost item =
       link = rssItemLink item
   in (\t l part -> fromPartial t l part) <$> title <*> link <*> partialPost
 
-
+-- Add a title and link to a partial post to make it a fullpost
 fromPartial :: String -> String -> PartialPost -> FullPost
 fromPartial title link (PartialPost auth desc time) = FullPost auth desc time title link
 
@@ -152,10 +122,7 @@ fromPartial title link (PartialPost auth desc time) = FullPost auth desc time ti
 eitherToMaybe :: Either a b -> Maybe b
 eitherToMaybe = either (\_ -> Nothing) (Just)
 
-data FullPost = FullPost { fullPostAuthor :: String, fullPostDescription :: String, fullPostTime :: UTCTime, fullPostTitle :: String, fullPostLink :: String} deriving (Show)
-
-data PartialPost = PartialPost {author :: String , description :: String, postTime :: UTCTime} deriving (Show)
-
+-- Turn a post into the same format as the old Hackage Twitter bot
 formatPost :: FullPost -> String
 formatPost (FullPost author desc time title link) =
   let auth' = (Data.Char.toLower . Prelude.head $ author) : (Prelude.tail author)
@@ -163,14 +130,16 @@ formatPost (FullPost author desc time title link) =
       desc' = if (crucialLength + (Prelude.length desc) > 140) then trimOff crucialLength desc else desc
   in title ++ ", " ++ auth' ++ ": " ++ desc ++ " " ++ link
 
+-- Used when a post description is too long
+-- Trims off n+3 elements and adds "..." to the end
 trimOff :: Int -> String -> String
 trimOff n xs = Prelude.take (n + 3) xs ++ "..."
 
-
-
+-- Used to parse the crazy time that somehow comes out of the hackage API
 parseStupidTime :: String -> Maybe UTCTime
 parseStupidTime = parseTime defaultTimeLocale "%a %b  %e %H:%M:%S %Z %Y"
 
+-- Parse a partial post from the description
 parsePost :: APT.Parser PartialPost
 parsePost = do
     APT.string "<i>"
@@ -185,15 +154,3 @@ parsePost = do
     case (parseStupidTime . unpack $ sDate) of
       (Just time) ->  return $ PartialPost (unpack author) (unpack description) time
       _ -> fail "Error reading time"
-
-shortenURLs :: BitLyKey -> FullPost -> IO (Maybe FullPost)
-shortenURLs k p = do
-  link' <- shortenURL k (fullPostLink p)
-  case link' of
-    (Just l) -> return . Just $ (p {fullPostLink = l})
-    Nothing -> return Nothing
-
-shortenURL :: BitLyKey -> String -> IO (Maybe String)
-shortenURL key longURL = do
-  resp <- W.asJSON =<< W.get ("https://api-ssl.bitly.com" ++ "/v3/shorten?access_token=" ++ (bitLyKey key)  ++ "&longUrl=" ++ longURL )
-  return $ bitLyUrl . bitlyData <$> resp ^? W.responseBody
