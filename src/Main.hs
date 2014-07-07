@@ -94,7 +94,7 @@ startBot key st = forever $ do
   let newfeeds = S.toList . S.fromList $ Prelude.map formatPost $ catMaybes shortenedFeeds
   printWithTime $ "Current state- " ++ (show lastTime)
   if (Prelude.length newfeeds > 0) then printWithTime . show $ newfeeds else return ()
-  traverse (\post -> catch (postToTwitter post) (\(e :: SomeException) -> printWithTime . show $ e)) newfeeds -- post all remaining to twitter
+  traverse (forkIO . postToTwitter) newfeeds -- post all remaining to twitter
   threadDelay $ 60 * 1000000
 
 printWithTime :: String -> IO ()
@@ -105,11 +105,13 @@ printWithTime t = do
 -- Use the environment variables (Look at twitter-conduit for more information)
 -- in order to make a post
 postToTwitter :: String -> IO ()
-postToTwitter st = runTwitterFromEnv' $ do
-  let status = T.pack st
-  liftIO $ T.putStrLn $ "Post message: " <> status
-  res <- call $ update status
-  return ()
+postToTwitter st = 
+  catch (post st) (\(e :: SomeException) -> (printWithTime . show $ e) >> postToTwitter st)
+  where post st = runTwitterFromEnv' $ do
+          let status = T.pack st
+          liftIO $ T.putStrLn $ "Post message: " <> status
+          res <- call $ update status
+          return ()
   -- liftIO $ print res
 
 -- Attempt to read a feed into fullposts
