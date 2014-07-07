@@ -1,7 +1,7 @@
 module Hackage.Twitter.Bot.Types where
 
-import Data.Time.Clock
-import Data.Time
+import           Data.Time       ()
+import           Data.Time.Clock
 
 data FullPost = FullPost { fullPostAuthor :: String, fullPostDescription :: String, fullPostTime :: UTCTime, fullPostTitle :: String, fullPostLink :: String} deriving (Show)
 

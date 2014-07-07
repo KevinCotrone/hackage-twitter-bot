@@ -20,7 +20,7 @@ data BitLyData a = BitLyData {bitlyData :: a} deriving (Show)
 -- API call to the short url
 data BitLyURL = BitLyURL {bitLyUrl :: String} deriving (Show)
 -- API Key for bitly
-data BitLyKey = BitLyKey {bitLyKey :: String} deriving (Show, Eq, Generic)
+data BitLyKey = BitLyKey {bitLyKey :: String, lastErrorTime :: String} deriving (Show, Eq, Generic)
 
 
 -- Instances to handle the parsing from bitly. Definitely not complete.

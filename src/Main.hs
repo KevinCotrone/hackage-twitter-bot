@@ -41,6 +41,7 @@ import           Data.Maybe
 import           Data.Monoid
 import           Data.Monoid
 import           Data.SafeCopy              (base, deriveSafeCopy)
+import qualified Data.Set                   as S
 import           Data.Text
 import qualified Data.Text                  as T
 import qualified Data.Text.IO               as T
@@ -68,29 +69,38 @@ import           Web.Twitter.Conduit
 
 main :: IO ()
 main = do
-  st <- openLocalStateFrom "state" initialLastTimeState
   btly <- decodeFile "config.yml" :: IO (Maybe BitLyKey)
   case btly of
-    Just k -> startBot k st
+    Just k -> do
+      st <- openLocalStateFrom "state" (LastTimeState (betterParse (lastErrorTime k)))
+      startBot k st
     Nothing -> fail "error reading bitly key"
 
+betterParse :: String -> UTCTime
+betterParse s = case (parseStupidTime s) of
+                (Just t) -> t
+                Nothing -> error "Unable to parse time"
 
 startBot :: BitLyKey -> AcidState LastTimeState -> IO ()
 startBot key st = forever $ do
   lastTime <- query' st PeekLastTime -- Get the time of the last post
-  putStrLn "Getting body"
   feedBody <- W.get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf W.responseBody -- Fetch the rss fedd in a bytestring and then cconcat it
   let feed = parseFeedString feedBody -- Parse the feed
-  putStrLn "Parsing feeds"
-  parsed <- parseFeeds $ fromJust feed -- Should be able to just 
+  parsed <- parseFeeds $ fromJust feed -- Should be able to just
   let filteredFeeds = Prelude.filter (\post -> fullPostTime post > lastTime) $ catMaybes parsed -- filter the posts that have might have already been posted
-  putStrLn "Getting body"
   shortenedFeeds <- traverse (shortenURLs key) filteredFeeds                                    -- shorten all yrks
   T.traverse (\fp -> update' st (SetNewLastTime (fullPostTime fp))) (catMaybes shortenedFeeds)  -- update the acid-state when appropriate
   createCheckpoint st
-  putStrLn . show . Prelude.map formatPost $ catMaybes shortenedFeeds
-  traverse (\post -> catch (postToTwitter . formatPost $ post) (\(e :: SomeException) -> putStrLn . show $ e)) $ catMaybes shortenedFeeds -- post all remaining to twitter
-  threadDelay $ 15 * 1000000
+  let newfeeds = S.toList . S.fromList $ Prelude.map formatPost $ catMaybes shortenedFeeds
+  printWithTime $ "Current state- " ++ (show lastTime)
+  if (Prelude.length newfeeds > 0) then printWithTime . show $ newfeeds else return ()
+  traverse (\post -> catch (postToTwitter post) (\(e :: SomeException) -> printWithTime . show $ e)) newfeeds -- post all remaining to twitter
+  threadDelay $ 60 * 1000000
+
+printWithTime :: String -> IO ()
+printWithTime t = do
+  ct <- getCurrentTime
+  putStrLn $ (show ct) ++ " - " ++ t
 
 -- Use the environment variables (Look at twitter-conduit for more information)
 -- in order to make a post
@@ -99,7 +109,8 @@ postToTwitter st = runTwitterFromEnv' $ do
   let status = T.pack st
   liftIO $ T.putStrLn $ "Post message: " <> status
   res <- call $ update status
-  liftIO $ print res
+  return ()
+  -- liftIO $ print res
 
 -- Attempt to read a feed into fullposts
 parseFeeds :: Feed -> IO [Maybe FullPost]
