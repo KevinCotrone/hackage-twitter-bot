@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE DeriveGeneric #-}
 
 module Common where
 
@@ -19,6 +20,26 @@ import Control.Monad.Trans.Resource
 import System.Environment
 import Control.Monad.Logger
 import Control.Lens
+import GHC.Generics
+import Data.Yaml
+import Data.Aeson
+
+
+data TwitterAuthentication = TwitterAuthentication {
+    consumerKey :: String
+   ,consumerSecret :: String
+   ,accessToken :: String
+   ,accessSecret :: String
+} deriving (Show, Read, Eq, Generic)
+
+instance FromJSON TwitterAuthentication where
+
+readOauthTokens :: String -> IO  (OAuth, Credential)
+readOauthTokens conf = do
+  mOauth <- decodeFile conf :: IO (Maybe TwitterAuthentication)
+  case mOauth of
+    (Just oauth) -> return $ ((twitterOAuth {oauthConsumerKey = S8.pack $ consumerKey oauth, oauthConsumerSecret = S8.pack $ consumerSecret oauth}), Credential [("oauth_token", S8.pack $  accessToken oauth),("oauth_token_secret", S8.pack $  accessSecret oauth)])
+    Nothing -> fail "Error reading oauth credentials"
 
 getOAuthTokens :: IO (OAuth, Credential)
 getOAuthTokens = do
@@ -60,3 +81,12 @@ runTwitterFromEnv task = do
 
 runTwitterFromEnv' :: (MonadIO m, MonadBaseControl IO m) => TW (ResourceT (NoLoggingT m)) a -> m a
 runTwitterFromEnv' = runNoLoggingT . runTwitterFromEnv
+
+runTwitter' :: (MonadIO m, MonadBaseControl IO m) => (OAuth, Credential) -> TW (ResourceT (NoLoggingT m)) a -> m a
+runTwitter' oauth = runNoLoggingT . (runTwitter oauth)
+
+runTwitter :: (MonadIO m, MonadBaseControl IO m) => (OAuth, Credential) -> TW (ResourceT m) a -> m a
+runTwitter (oa, cred) task = do
+    pr <- liftBase getProxyEnv
+    let env = (setCredential oa cred def) { twProxy = pr }
+    runTW env task

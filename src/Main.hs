@@ -13,7 +13,7 @@
 
 module Main where
 
-
+import Web.Authenticate.OAuth as OA
 import           Common
 import           Control.Applicative        ((<$>), (<*>))
 import           Control.Applicative
@@ -65,15 +65,17 @@ import           Text.Feed.Types
 import           Text.RSS.Syntax
 import           Text.XML.Light
 import           Web.Twitter.Conduit
+import           Web.Twitter.Conduit
 
 
 main :: IO ()
 main = do
   btly <- decodeFile "config.yml" :: IO (Maybe BitLyKey)
+  oauth <- readOauthTokens "config.yml"
   case btly of
     Just k -> do
       st <- openLocalStateFrom "state" (LastTimeState (betterParse (lastErrorTime k)))
-      startBot k st
+      startBot oauth k st
     Nothing -> fail "error reading bitly key"
 
 betterParse :: String -> UTCTime
@@ -81,8 +83,8 @@ betterParse s = case (parseStupidTime s) of
                 (Just t) -> t
                 Nothing -> error "Unable to parse time"
 
-startBot :: BitLyKey -> AcidState LastTimeState -> IO ()
-startBot key st = forever $ do
+startBot :: (OAuth, Credential) -> BitLyKey -> AcidState LastTimeState -> IO ()
+startBot oauth key st = forever $ do
   lastTime <- query' st PeekLastTime -- Get the time of the last post
   feedBody <- W.get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf W.responseBody -- Fetch the rss fedd in a bytestring and then cconcat it
   let feed = parseFeedString feedBody -- Parse the feed
@@ -94,7 +96,7 @@ startBot key st = forever $ do
   let newfeeds = S.toList . S.fromList $ Prelude.map formatPost $ catMaybes shortenedFeeds
   printWithTime $ "Current state- " ++ (show lastTime)
   if (Prelude.length newfeeds > 0) then printWithTime . show $ newfeeds else return ()
-  traverse (forkIO . postToTwitter) newfeeds -- post all remaining to twitter
+  traverse (forkIO . postToTwitter oauth) newfeeds -- post all remaining to twitter
   threadDelay $ 60 * 1000000
 
 printWithTime :: String -> IO ()
@@ -104,10 +106,10 @@ printWithTime t = do
 
 -- Use the environment variables (Look at twitter-conduit for more information)
 -- in order to make a post
-postToTwitter :: String -> IO ()
-postToTwitter st = 
-  catch (post st) (\(e :: SomeException) -> (printWithTime . show $ e) >> postToTwitter st)
-  where post st = runTwitterFromEnv' $ do
+postToTwitter :: (OAuth, Credential) -> String -> IO ()
+postToTwitter oauth st =
+  catch (post st) (\(e :: SomeException) -> (printWithTime . show $ e) >> postToTwitter oauth st)
+  where post st = runTwitter' oauth $ do
           let status = T.pack st
           liftIO $ T.putStrLn $ "Post message: " <> status
           res <- call $ update status
