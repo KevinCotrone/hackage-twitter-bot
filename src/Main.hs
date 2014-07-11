@@ -85,17 +85,24 @@ betterParse s = case (parseStupidTime s) of
 
 startBot :: (OAuth, Credential) -> BitLyKey -> AcidState LastTimeState -> IO ()
 startBot oauth key st = forever $ do
+  putStrLn . show $ 1
   lastTime <- query' st PeekLastTime -- Get the time of the last post
+  putStrLn . show $ 2
   feedBody <- W.get "http://hackage.haskell.org/packages/recent.rss" >>= return . CBS.unpack . mconcat . toListOf W.responseBody -- Fetch the rss fedd in a bytestring and then cconcat it
+  putStrLn . show $ 3
   let feed = parseFeedString feedBody -- Parse the feed
   parsed <- parseFeeds $ fromJust feed -- Should be able to just
   let filteredFeeds = Prelude.filter (\post -> fullPostTime post > lastTime) $ catMaybes parsed -- filter the posts that have might have already been posted
-  shortenedFeeds <- traverse (shortenURLs key) filteredFeeds                                    -- shorten all yrks
+  aShortenedFeeds <- traverse (\x -> async $ shortenURLs key x) filteredFeeds 
+  shortenedFeeds <- T.traverse wait aShortenedFeeds                                   -- shorten all links
+  putStrLn . show $ 4
   T.traverse (\fp -> update' st (SetNewLastTime (fullPostTime fp))) (catMaybes shortenedFeeds)  -- update the acid-state when appropriate
   createCheckpoint st
+  putStrLn . show $ 5
   let newfeeds = S.toList . S.fromList $ Prelude.map formatPost $ catMaybes shortenedFeeds
   printWithTime $ "Current state- " ++ (show lastTime)
   if (Prelude.length newfeeds > 0) then printWithTime . show $ newfeeds else return ()
+  putStrLn . show $ 6
   traverse (forkIO . postToTwitter oauth) newfeeds -- post all remaining to twitter
   threadDelay $ 60 * 1000000
 
@@ -152,7 +159,7 @@ trimOff n xs = Prelude.take (n + 3) xs ++ "..."
 
 -- Used to parse the crazy time that somehow comes out of the hackage API
 parseStupidTime :: String -> Maybe UTCTime
-parseStupidTime = parseTime defaultTimeLocale "%a %b  %e %H:%M:%S %Z %Y"
+parseStupidTime = parseTime defaultTimeLocale "%a %b %e %H:%M:%S %Z %Y"
 
 -- Parse a partial post from the description
 parsePost :: APT.Parser PartialPost
